@@ -1,7 +1,7 @@
 """
 SQuAD RAG-System
 ================
-Sidst opdateret: 2026-09-19 14:37:00
+Sidst opdateret: 2026-09-19 16:04:00
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 HVORDAN RAG FUNGERER
@@ -32,7 +32,6 @@ Begrænsninger:
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 SQuAD-DATASET
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
 Direkte download (JSON):
    https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/train-v1.1.json
 
@@ -140,7 +139,6 @@ EKSEMPLER
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 Når systemet køres, kan du stille spørgsmål som:
-
 - "To whom did the Virgin Mary allegedly appear in 1858 in Lourdes France?"
   → Svar: "Saint Bernadette Soubirous"
 
@@ -153,7 +151,6 @@ Når systemet køres, kan du stille spørgsmål som:
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 FEJLSØGNING
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
 - [ModuleNotFoundError]&#58;   - Sikre, at alle pakker er installeret:
     `pip install ollama chromadb sentence-transformers ijson langchain-text-splitters`.
 
@@ -161,11 +158,11 @@ FEJLSØGNING
   - Prøv at slette og genoprette Chroma DB:
     `rm -rf squad_rag_db` og kør programmet igen.
 
-- [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Øg `n_results` i `ask_rag` (f.eks. fra 3 til 5).
+- [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Øg `n_results` i `CONFIG` (f.eks. fra 3 til 5).
   - Øg `chunk_size` (f.eks. fra 500 til 1000) for at bevare mere kontekst.
 
 - [Forkert svar]&#58;   - Tjek om konteksten indeholder det korrekte svar. Hvis ja, juster prompten
-    til at være mere specifik.
+  til at være mere specifik.
 
 Output-format under evaluering:
 
@@ -232,6 +229,8 @@ CONFIG = {
     "embeddings_model": "all-MiniLM-L6-v2",
     "llm_model": "qwen2.5:3b",
     "chroma_db_path": "squad_rag_db",
+    "chroma_collection": "squad_contexts",
+    "n_results": 3,
     "ollama_num_predict": 128,
 }
 
@@ -263,61 +262,58 @@ def download_squad() -> None:
 
 def load_squad_subset(
     max_questions: int = CONFIG["max_questions"]
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], List[str]]:
     """
-    Indlæser et subset af SQuAD-dataset ved hjælp af streaming-parsing (sparer RAM).
+    Indlæser et subset af SQuAD-dataset.
 
-    Bruger ijson til at parse JSON-filen i realtid uden at indlæse hele filen
-    i hukommelsen.
+    Spørgsmål, korrekte svar og kontekst gemmes samtidig, så de altid
+    forbliver korrekt parret.
 
     Args:
         max_questions: Maksimal antal spørgsmål at indlæse (default: 1000).
 
     Returns:
-        Tuple[List[str], List[str]]:
-            - contexts: Liste af kontekst-strenge (tekster fra SQuAD).
-            - questions: Liste af spørgsmål (fra SQuAD).
-
-    Example:
-        >>> contexts, questions = load_squad_subset(max_questions=100)
-        >>> len(questions)
-        100
+        Tuple[List[str], List[str], List[str]]:
+            - contexts: Liste af kontekst-strenge.
+            - questions: Liste af spørgsmål.
+            - answers: Liste af korrekte svar.
     """
     contexts = []
     questions = []
-    question_count = 0
-    current_context = None
+    answers = []
 
     print(f"Indlæser {max_questions} spørgsmål fra SQuAD...")
 
     with open(CONFIG["squad_file"], "rb") as f:
-        parser = ijson.parse(f)
+        for item in ijson.items(f, "data.item"):
+            for paragraph in item["paragraphs"]:
+                context = paragraph["context"]
 
-        for prefix, event, value in parser:
-            if prefix == "data.item.paragraphs.item.context":
-                current_context = value
+                for qa in paragraph["qas"]:
+                    if len(questions) >= max_questions:
+                        break
 
-            elif prefix == "data.item.paragraphs.item.qas.item.question":
-                if question_count < max_questions and current_context:
-                    questions.append(value)
-                    contexts.append(current_context)
-                    question_count += 1
+                    questions.append(qa["question"])
+                    answers.append(qa["answers"][0]["text"])
+                    contexts.append(context)
 
-                if question_count >= max_questions:
+                if len(questions) >= max_questions:
                     break
+
+            if len(questions) >= max_questions:
+                break
 
     print(
         f"Indlæst {len(questions)} spørgsmål fra "
         f"{len(set(contexts))} unikke kontekster."
     )
 
-    return contexts, questions
+    return contexts, questions, answers
 
 
 def clean_text(text: str) -> str:
     """
     Renser en tekststreng ved at fjerne ekstra mellemrum og specialtegn.
-
     Bevarer kun alphanumeriske tegn, mellemrum, og punktering
     (.,!?;:).
 
@@ -386,30 +382,34 @@ def clean_and_chunk(
 
 
 # --- Chroma DB Opsætning ---
-def setup_chroma_db(chunks: List[str]) -> chromadb.Collection:
+def setup_chroma_db(
+    chunks: List[str]
+) -> Tuple[chromadb.Collection, SentenceTransformer]:
     """
-    Opretter en Chroma DB-kollektion og gemmer chunks med deres embeddings.
+    Opretter eller genbruger Chroma DB.
 
-    Chroma DB bruges til hurtigt at søge i vektorer ved hjælp af cosinus-lighed.
+    Hvis databasen allerede indeholder chunks, genbruges den,
+    så embeddings ikke skal beregnes igen ved hver programstart.
 
     Args:
         chunks: Liste af tekst-chunks, der skal gemmes i databasen.
 
     Returns:
-        chromadb.Collection: Den oprettede Chroma DB-kollektion med chunks
-        og embeddings.
+        Tuple:
+            - Chroma DB-kollektionen.
+            - SentenceTransformer-modellen.
 
     Side Effects:
         Opretter en persistent Chroma DB i mappen `squad_rag_db`.
     """
-    print("Opretter Chroma DB...")
+    print("Opretter/åbner Chroma DB...")
 
     client = chromadb.PersistentClient(
         path=CONFIG["chroma_db_path"]
     )
 
     collection = client.get_or_create_collection(
-        name="squad_contexts"
+        name=CONFIG["chroma_collection"]
     )
 
     print(
@@ -421,7 +421,16 @@ def setup_chroma_db(chunks: List[str]) -> chromadb.Collection:
         CONFIG["embeddings_model"]
     )
 
-    print("Generer embeddings...")
+    # Hvis databasen allerede indeholder data, genbruger vi den.
+    # Det sparer tid, fordi embeddings ellers skal beregnes igen.
+    if collection.count() > 0:
+        print(
+            f"Genbruger eksisterende Chroma DB "
+            f"({collection.count()} chunks)."
+        )
+        return collection, model
+
+    print("Genererer embeddings...")
 
     embeddings = model.encode(
         chunks,
@@ -448,8 +457,9 @@ def setup_chroma_db(chunks: List[str]) -> chromadb.Collection:
 def ask_rag(
     collection: chromadb.Collection,
     model: SentenceTransformer,
+    ollama_client: Client,
     query: str,
-    n_results: int = 3
+    n_results: int = CONFIG["n_results"]
 ) -> str:
     """
     Udfører en RAG-forespørgsel: Søger i Chroma DB og generer et svar
@@ -459,21 +469,13 @@ def ask_rag(
         collection: Chroma DB-kollektion med gemte chunks og embeddings.
         model: SentenceTransformer-model til at generere embeddings
                for spørgsmålet.
+        ollama_client: Genbrugt Ollama-client.
         query: Spørgsmålet, der skal besvares.
         n_results: Antal chunks at returnere fra Chroma DB (default: 3).
 
     Returns:
         str: LLM'ens genererede svar baseret på den fundne kontekst.
-
-    Example:
-        >>> ask_rag(
-        ...     collection,
-        ...     model,
-        ...     "Hvornår begyndte Scholastic Magazine?"
-        ... )
-        "Scholastic Magazine begyndte at blive udgivet i september 1876."
     """
-
     query_embedding = model.encode([query]).tolist()
 
     results = collection.query(
@@ -490,17 +492,17 @@ def ask_rag(
     # SQuAD-datasættet, som er fundet via ChromaDB og bruges som kontekst
     # til at besvare spørgsmålet.
     prompt = f"""
-    Besvar spørgsmålet baseret på konteksten nedenfor.
+    Besvar spørgsmålet kort og præcist baseret kun på konteksten nedenfor.
+    Brug ikke viden, som ikke findes i konteksten.
     Hvis svaret ikke findes i konteksten, sig "Jeg ved det ikke".
 
     Kontekst:
     {context}
 
     Spørgsmål: {query}
+
     Svar:
     """
-
-    ollama_client = Client()
 
     response = ollama_client.generate(
         model=CONFIG["llm_model"],
@@ -517,48 +519,43 @@ def ask_rag(
 def evaluate_rag(
     collection: chromadb.Collection,
     model: SentenceTransformer,
+    ollama_client: Client,
     questions: List[str],
     answers: List[str],
     num_questions: int = 10
 ) -> float:
     """
-    Evaluere RAG-systemet ved at sammenligne LLM-svar med korrekte svar
+    Evaluerer RAG-systemet ved at sammenligne LLM-svar med korrekte svar
     fra SQuAD.
 
     Args:
         collection: Chroma DB-kollektion med gemte chunks og embeddings.
         model: SentenceTransformer-model til at generere embeddings.
+        ollama_client: Genbrugt Ollama-client.
         questions: Liste af spørgsmål at evaluere på.
         answers: Liste af korrekte svar (svarende til spørgsmålene).
         num_questions: Antal spørgsmål at evaluere (default: 10).
 
     Returns:
-        float: Præcision som procentdel (f.eks. 50.0 for 5/10 korrekte).
-
-    Side Effects:
-        Printer detaljerede resultater for hver spørgsmål (OK/ERR).
-
-    Example:
-        >>> accuracy = evaluate_rag(
-        ...     collection,
-        ...     model,
-        ...     test_questions,
-        ...     test_answers,
-        ...     num_questions=5
-        ... )
-        Præcision: 80.0% (4/5 korrekte)
+        float: Præcision som procentdel.
     """
-
     correct = 0
 
-    for i in range(
-        min(num_questions, len(questions))
-    ):
+    # Brug det faktiske antal spørgsmål, der kan evalueres.
+    questions_to_evaluate = min(
+        num_questions,
+        len(questions),
+        len(answers)
+    )
+
+    for i in range(questions_to_evaluate):
         query = questions[i]
         true_answer = answers[i].lower()
+
         rag_answer = ask_rag(
             collection,
             model,
+            ollama_client,
             query
         ).lower()
 
@@ -580,13 +577,17 @@ def evaluate_rag(
             f"   RAG-svar: {rag_answer}"
         )
 
+    if questions_to_evaluate == 0:
+        print("\nIngen spørgsmål kunne evalueres.")
+        return 0.0
+
     accuracy = (
-        correct / num_questions
+        correct / questions_to_evaluate
     ) * 100
 
     print(
         f"\nPræcision: {accuracy:.1f}% "
-        f"({correct}/{num_questions} korrekte)"
+        f"({correct}/{questions_to_evaluate} korrekte)"
     )
 
     return accuracy
@@ -598,10 +599,11 @@ def main():
     Hovedfunktion, der kører hele RAG-workflow:
 
     1. Downloader SQuAD-dataset (hvis nødvendigt).
-    2. Indlæser og opdeler data i chunks.
-    3. Opretter Chroma DB med embeddings.
-    4. Tester systemet med 10 spørgsmål.
-    5. Åbner interaktivt spørgsmålsinterface.
+    2. Indlæser spørgsmål, svar og kontekster.
+    3. Opdeler data i chunks.
+    4. Opretter eller genbruger Chroma DB med embeddings.
+    5. Tester systemet med 10 spørgsmål.
+    6. Åbner interaktivt spørgsmålsinterface.
 
     Args:
         None
@@ -609,14 +611,15 @@ def main():
     Returns:
         None
     """
-
     print("=" * 60)
     print("SQuAD RAG-System")
     print("=" * 60)
 
     download_squad()
 
-    contexts, questions = load_squad_subset(
+    # Spørgsmål, korrekte svar og kontekst indlæses samtidig,
+    # så spørgsmål og svar altid er korrekt parret.
+    contexts, questions, answers = load_squad_subset(
         CONFIG["max_questions"]
     )
 
@@ -628,31 +631,19 @@ def main():
         chunks
     )
 
+    # Opret én Ollama-client og genbrug den under hele programmet.
+    ollama_client = Client()
+
     print("\n" + "=" * 60)
     print("Test af RAG-systemet")
     print("=" * 60)
 
-    test_questions = questions[:10]
-    test_answers = []
-
-    with open(CONFIG["squad_file"], "rb") as f:
-        parser = ijson.parse(f)
-        answer_count = 0
-
-        for prefix, event, value in parser:
-            if (
-                prefix
-                == "data.item.paragraphs.item.qas.item.answers.item.text"
-                and answer_count < 10
-            ):
-                test_answers.append(value)
-                answer_count += 1
-
     evaluate_rag(
         collection,
         embeddings_model,
-        test_questions,
-        test_answers,
+        ollama_client,
+        questions,
+        answers,
         num_questions=10
     )
 
@@ -679,6 +670,7 @@ def main():
             answer = ask_rag(
                 collection,
                 embeddings_model,
+                ollama_client,
                 query
             )
 
