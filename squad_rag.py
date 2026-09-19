@@ -482,6 +482,11 @@ def ask_rag(
         query_embeddings=query_embedding,
         n_results=n_results
     )
+ 
+    # Debug: vis hvilke chunks ChromaDB har fundet.
+    for idx, doc in enumerate(results["documents"][0], 1):
+        print(f"\n   Chunk {idx}:")
+        print(f"   {doc}")
 
     context = "\n\n".join(
         results["documents"][0]
