@@ -1,7 +1,7 @@
 """
 SQuAD RAG-System
 ================
-Sidst opdateret: 2026-09-19 16:04:00
+Sidst opdateret: 2026-09-19 15:30:54
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 HVORDAN RAG FUNGERER
@@ -19,7 +19,7 @@ Workflow:
 
 Fordele ved RAG:
 
-- **Reducerer hallucinationer**: LLM'en svare udelukkende baseret på kontekst, ikke sin træning.
+- **Reducerer hallucinationer**: LLM'en svarer udelukkende baseret på kontekst, ikke sin træning.
 - **Aktuelle oplysninger**: Kan svare baseret på specifikke data (f.eks. SQuAD-dataset).
 - **Transparens**: Svaret kan spores tilbage til konteksten.
 
@@ -241,12 +241,11 @@ CONFIG = {
     "embeddings_model": "all-MiniLM-L6-v2",
     "llm_model": "qwen2.5:3b",
 
-    # Separat test-database, så testen ikke blander sig
-    # med den tidligere squad_rag_db.
+    # Separat test-database.
     "chroma_db_path": "squad_rag_test_db",
     "chroma_collection": "squad_contexts_test",
 
-    # Ændret fra 3 til 5 for at give LLM'en mere relevant kontekst.
+    # Ændret fra 3 til 5.
     "n_results": 5,
 
     "ollama_num_predict": 128,
@@ -257,15 +256,6 @@ CONFIG = {
 def download_squad() -> None:
     """
     Downloader SQuAD-dataset fra GitHub, hvis det ikke allerede eksisterer lokalt.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Side Effects:
-        Downloader filen `train-v1.1.json` til den aktuelle mappe, hvis den ikke findes.
     """
     if not os.path.exists(CONFIG["squad_file"]):
         print("Downloader SQuAD-dataset (120MB)...")
@@ -283,17 +273,9 @@ def load_squad_subset(
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     Indlæser et subset af SQuAD-dataset.
-    Spørgsmål, korrekte svar og kontekst gemmes samtidig, så de altid
-    forbliver korrekt parret.
 
-    Args:
-        max_questions: Maksimal antal spørgsmål at indlæse (default: 1000).
-
-    Returns:
-        Tuple[List[str], List[str], List[str]]:
-            - contexts: Liste af kontekst-strenge.
-            - questions: Liste af spørgsmål.
-            - answers: Liste af korrekte svar.
+    Spørgsmål, korrekte svar og kontekst gemmes samtidig,
+    så de altid forbliver korrekt parret.
     """
     contexts = []
     questions = []
@@ -331,18 +313,6 @@ def load_squad_subset(
 def clean_text(text: str) -> str:
     """
     Renser en tekststreng ved at fjerne ekstra mellemrum og specialtegn.
-    Bevarer kun alphanumeriske tegn, mellemrum, og punktering
-    (.,!?;:).
-
-    Args:
-        text: Den tekst, der skal renses.
-
-    Returns:
-        str: Den rensede tekst.
-
-    Example:
-        >>> clean_text("  Dette   er  en   test!  ")
-        "Dette er en test!"
     """
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'[^\w\s.,!?;:]', '', text)
@@ -356,25 +326,12 @@ def clean_and_chunk(
     chunk_overlap: int = CONFIG["chunk_overlap"]
 ) -> List[str]:
     """
-    Renser og opdeler en liste af tekststrenge i mindre chunks.
+    Renser og opdeler tekst i chunks.
 
-    Identiske kontekster fjernes først, fordi flere SQuAD-spørgsmål
-    kan bruge præcis den samme kontekst. Dermed bliver den samme
-    tekst ikke gemt som identiske chunks flere gange.
-
-    Bruger RecursiveCharacterTextSplitter til at opdele tekster på en
-    intelligent måde, der bevarer ord og sætninger.
-
-    Args:
-        texts: Liste af tekststrenge, der skal renses og opdeles.
-        chunk_size: Størrelsen på hver chunk i tegn (default: 800).
-        chunk_overlap: Antal tegn, der overlapper mellem chunks (default: 100).
-
-    Returns:
-        List[str]: Liste af rensede og opdelte tekst-chunks.
+    Identiske kontekster fjernes først, så den samme kontekst
+    ikke bliver chunket flere gange.
     """
 
-    # Fjern dubletter, men bevar rækkefølgen.
     unique_texts = list(
         dict.fromkeys(texts)
     )
@@ -404,7 +361,8 @@ def clean_and_chunk(
 
     print(
         f"Oprettet {len(chunks)} chunks "
-        f"(størrelse: {chunk_size} tegn, overlap: {chunk_overlap})."
+        f"(størrelse: {chunk_size} tegn, "
+        f"overlap: {chunk_overlap})."
     )
 
     return chunks
@@ -416,20 +374,6 @@ def setup_chroma_db(
 ) -> Tuple[chromadb.Collection, SentenceTransformer]:
     """
     Opretter eller genbruger Chroma DB.
-
-    Hvis databasen allerede indeholder chunks, genbruges den,
-    så embeddings ikke skal beregnes igen ved hver programstart.
-
-    Args:
-        chunks: Liste af tekst-chunks, der skal gemmes i databasen.
-
-    Returns:
-        Tuple:
-            - Chroma DB-kollektionen.
-            - SentenceTransformer-modellen.
-
-    Side Effects:
-        Opretter en persistent Chroma DB i mappen `squad_rag_test_db`.
     """
     print("Opretter/åbner Chroma DB...")
 
@@ -450,8 +394,7 @@ def setup_chroma_db(
         CONFIG["embeddings_model"]
     )
 
-    # Hvis databasen allerede indeholder data, genbruger vi den.
-    # Det sparer tid, fordi embeddings ellers skal beregnes igen.
+    # Genbrug eksisterende test-DB, hvis den allerede er bygget.
     if collection.count() > 0:
         print(
             f"Genbruger eksisterende test-DB "
@@ -494,20 +437,9 @@ def ask_rag(
     n_results: int = CONFIG["n_results"]
 ) -> str:
     """
-    Udfører en RAG-forespørgsel: Søger i Chroma DB og generer et svar
-    ved hjælp af LLM'en.
-
-    Args:
-        collection: Chroma DB-kollektion med gemte chunks og embeddings.
-        model: SentenceTransformer-model til at generere embeddings
-               for spørgsmålet.
-        ollama_client: Genbrugt Ollama-client.
-        query: Spørgsmålet, der skal besvares.
-        n_results: Antal chunks at returnere fra Chroma DB (default: 5).
-
-    Returns:
-        str: LLM'ens genererede svar baseret på den fundne kontekst.
+    Udfører en RAG-forespørgsel.
     """
+
     query_embedding = model.encode(
         [query]
     ).tolist()
@@ -525,8 +457,6 @@ def ask_rag(
     distances = results["distances"][0]
 
     # Fjern identiske chunks fra retrieval-resultatet.
-    # Dette sikrer, at LLM'en får flere forskellige tekststykker,
-    # hvis Chroma returnerer dubletter.
     unique_documents = []
     unique_distances = []
     seen = set()
@@ -549,12 +479,8 @@ def ask_rag(
         f"{len(unique_documents)} unikke chunks"
     )
 
-    # Debug: vis hvilke chunks ChromaDB har fundet.
     for idx, (doc, distance) in enumerate(
-        zip(
-            unique_documents,
-            unique_distances
-        ),
+        zip(unique_documents, unique_distances),
         1
     ):
         print(
@@ -607,32 +533,19 @@ def evaluate_rag(
     num_questions: int = 10
 ) -> float:
     """
-    Evaluerer RAG-systemet ved at sammenligne LLM-svar med korrekte svar
-    fra SQuAD.
-
-    Args:
-        collection: Chroma DB-kollektion med gemte chunks og embeddings.
-        model: SentenceTransformer-model til at generere embeddings.
-        ollama_client: Genbrugt Ollama-client.
-        questions: Liste af spørgsmål at evaluere på.
-        answers: Liste af korrekte svar (svarende til spørgsmålene).
-        num_questions: Antal spørgsmål at evaluere (default: 10).
-
-    Returns:
-        float: Præcision som procentdel.
+    Evaluerer RAG-systemet ved at sammenligne LLM-svar
+    med korrekte SQuAD-svar.
     """
+
     correct = 0
 
-    # Brug det faktiske antal spørgsmål, der kan evalueres.
     questions_to_evaluate = min(
         num_questions,
         len(questions),
         len(answers)
     )
 
-    for i in range(
-        questions_to_evaluate
-    ):
+    for i in range(questions_to_evaluate):
         query = questions[i]
         true_answer = answers[i].lower()
 
@@ -682,35 +595,19 @@ def evaluate_rag(
 # --- Hovedprogram ---
 def main():
     """
-    Hovedfunktion, der kører hele RAG-workflow:
-
-    1. Downloader SQuAD-dataset (hvis nødvendigt).
-    2. Indlæser spørgsmål, svar og kontekster.
-    3. Fjerner dublerede kontekster og opdeler data i chunks.
-    4. Opretter eller genbruger Chroma DB med embeddings.
-    5. Tester systemet med 10 spørgsmål.
-    6. Åbner interaktivt spørgsmålsinterface.
-
-    Args:
-        None
-
-    Returns:
-        None
+    Hovedfunktion for hele RAG-workflowet.
     """
+
     print("=" * 60)
     print("SQuAD RAG-System")
     print("=" * 60)
 
     download_squad()
 
-    # Spørgsmål, korrekte svar og kontekst indlæses samtidig,
-    # så spørgsmål og svar altid er korrekt parret.
     contexts, questions, answers = load_squad_subset(
         CONFIG["max_questions"]
     )
 
-    # Samme kontekst kan bruges af flere spørgsmål.
-    # Derfor chunkes hver unik kontekst kun én gang.
     chunks = clean_and_chunk(
         contexts
     )
@@ -719,7 +616,7 @@ def main():
         chunks
     )
 
-    # Opret én Ollama-client og genbrug den under hele programmet.
+    # Genbrug én Ollama-client.
     ollama_client = Client()
 
     print("\n" + "=" * 60)
