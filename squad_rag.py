@@ -32,6 +32,7 @@ Begrænsninger:
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 SQuAD-DATASET
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
 Direkte download (JSON):
    https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/train-v1.1.json
 
@@ -111,13 +112,13 @@ Arkitektur:
        ↓
   [Load Subset] -> Indlæser 1.000 spørgsmål + kontekster
        ↓
-  [Clean & Chunk] -> Opdeler tekster i 500-tegn chunks
+  [Clean & Chunk] -> Opdeler unikke kontekster i 800-tegn chunks
        ↓
   [Embeddings] -> Konverterer chunks til vektorer (all-MiniLM-L6-v2)
        ↓
   [Chroma DB] -> Gemmer vektorer i lokal database
        ↓
-  [RAG Query] -> Søger i Chroma DB + sender top-3 chunks til LLM
+  [RAG Query] -> Søger i Chroma DB + sender top-5 chunks til LLM
        ↓
   [Ollama (Qwen2.5-3B)] -> Generer svar baseret på kontekst
        ↓
@@ -125,20 +126,23 @@ Arkitektur:
 
 Workflow:
 
-  1. Forberedelse: Indlæs SQuAD -> Chunk -> Embed -> Gem i Chroma DB
-  2. Spørgsmål: Søg i Chroma DB -> Send kontekst til LLM -> Få svar
+  1. Forberedelse: Indlæs SQuAD -> Fjern dublerede kontekster -> Chunk -> Embed -> Gem i Chroma DB
+  2. Spørgsmål: Søg i Chroma DB -> Send top-5 chunks -> Få svar fra LLM
   3. Evaluering: Sammenlign LLM-svar med korrekte svar fra SQuAD
 
 Optimeringer:
 
   - Streaming JSON-parsing (ijson) for at spare RAM
   - Batch-processing af embeddings (32 chunks ad gangen)
+  - Unikke SQuAD-kontekster chunkes kun én gang
+  - Persistent Chroma DB genbruges mellem programkørsler
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 EKSEMPLER
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 Når systemet køres, kan du stille spørgsmål som:
+
 - "To whom did the Virgin Mary allegedly appear in 1858 in Lourdes France?"
   → Svar: "Saint Bernadette Soubirous"
 
@@ -151,27 +155,29 @@ Når systemet køres, kan du stille spørgsmål som:
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 FEJLSØGNING
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
 - [ModuleNotFoundError]&#58;   - Sikre, at alle pakker er installeret:
     `pip install ollama chromadb sentence-transformers ijson langchain-text-splitters`.
 
-- [Chroma DB returnerer ingen resultater]&#58;   - Tjek, at `squad_rag_db` eksisterer i den aktuelle mappe.
-  - Prøv at slette og genoprette Chroma DB:
-    `rm -rf squad_rag_db` og kør programmet igen.
+- [Chroma DB returnerer ingen resultater]&#58;   - Tjek, at `squad_rag_test_db` eksisterer i den aktuelle mappe.
+  - Hvis chunking-konfigurationen ændres, skal test-databasen slettes og
+    genoprettes, så gamle chunks ikke blandes med den nye konfiguration.
 
-- [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Øg `n_results` i `CONFIG` (f.eks. fra 3 til 5).
-  - Øg `chunk_size` (f.eks. fra 500 til 1000) for at bevare mere kontekst.
+- [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Vi bruger `n_results=5` for at give LLM'en mere relevant kontekst.
+  - Vi bruger 800-tegn chunks med 100 tegn overlap.
 
-- [Forkert svar]&#58;   - Tjek om konteksten indeholder det korrekte svar. Hvis ja, juster prompten
-  til at være mere specifik.
+- [Forkert svar]&#58;   - Tjek om konteksten indeholder det korrekte svar. Hvis ja, kan fejlen
+    ligge i LLM'ens valg af svar.
 
 Output-format under evaluering:
 
 - [OK]&#58; RAG-svaret matchede det korrekte svar (uanset case).
 - [ERR]&#58; RAG-svaret var forkert eller ufuldstændigt.
-- Præcision: Procentdel af korrekte svar (f.eks. 50.0% = 5/10 korrekte).
+- Præcision: Procentdel af korrekte svar (f.eks. 90.0% = 9/10 korrekte).
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 ANVENDELSE:
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 - Kundesupport: Automatiser FAQ-svar baseret på produktdokumentation.
 - Intern videnbase: Gør medarbejdere i stand til hurtigt at finde HR/IT-oplysninger.
@@ -216,7 +222,10 @@ try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError as e:
     print(f"[ERR] Manglende bibliotek: {e}")
-    print("Installer med: pip install ollama chromadb sentence-transformers ijson langchain-text-splitters")
+    print(
+        "Installer med: pip install ollama chromadb "
+        "sentence-transformers ijson langchain-text-splitters"
+    )
     exit(1)
 
 
@@ -224,13 +233,22 @@ except ImportError as e:
 CONFIG = {
     "squad_file": "train-v1.1.json",
     "max_questions": 1000,
-    "chunk_size": 500,
-    "chunk_overlap": 50,
+
+    # Ændret for den test, der gav 90 %.
+    "chunk_size": 800,
+    "chunk_overlap": 100,
+
     "embeddings_model": "all-MiniLM-L6-v2",
     "llm_model": "qwen2.5:3b",
-    "chroma_db_path": "squad_rag_db",
-    "chroma_collection": "squad_contexts",
-    "n_results": 3,
+
+    # Separat test-database, så testen ikke blander sig
+    # med den tidligere squad_rag_db.
+    "chroma_db_path": "squad_rag_test_db",
+    "chroma_collection": "squad_contexts_test",
+
+    # Ændret fra 3 til 5 for at give LLM'en mere relevant kontekst.
+    "n_results": 5,
+
     "ollama_num_predict": 128,
 }
 
@@ -265,7 +283,6 @@ def load_squad_subset(
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     Indlæser et subset af SQuAD-dataset.
-
     Spørgsmål, korrekte svar og kontekst gemmes samtidig, så de altid
     forbliver korrekt parret.
 
@@ -341,26 +358,36 @@ def clean_and_chunk(
     """
     Renser og opdeler en liste af tekststrenge i mindre chunks.
 
+    Identiske kontekster fjernes først, fordi flere SQuAD-spørgsmål
+    kan bruge præcis den samme kontekst. Dermed bliver den samme
+    tekst ikke gemt som identiske chunks flere gange.
+
     Bruger RecursiveCharacterTextSplitter til at opdele tekster på en
     intelligent måde, der bevarer ord og sætninger.
 
     Args:
         texts: Liste af tekststrenge, der skal renses og opdeles.
-        chunk_size: Størrelsen på hver chunk i tegn (default: 500).
-        chunk_overlap: Antal tegn, der overlapper mellem chunks (default: 50).
+        chunk_size: Størrelsen på hver chunk i tegn (default: 800).
+        chunk_overlap: Antal tegn, der overlapper mellem chunks (default: 100).
 
     Returns:
         List[str]: Liste af rensede og opdelte tekst-chunks.
-
-    Example:
-        >>> clean_and_chunk(
-        ...     ["Dette er en lang tekst..."],
-        ...     chunk_size=20,
-        ...     chunk_overlap=5
-        ... )
-        ["Dette er en lang", "en lang tekst..."]
     """
-    cleaned_texts = [clean_text(text) for text in texts]
+
+    # Fjern dubletter, men bevar rækkefølgen.
+    unique_texts = list(
+        dict.fromkeys(texts)
+    )
+
+    print(
+        f"Chunker {len(unique_texts)} unikke contexts "
+        f"ud af {len(texts)} contexts."
+    )
+
+    cleaned_texts = [
+        clean_text(text)
+        for text in unique_texts
+    ]
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
@@ -371,7 +398,9 @@ def clean_and_chunk(
     chunks = []
 
     for text in cleaned_texts:
-        chunks.extend(text_splitter.split_text(text))
+        chunks.extend(
+            text_splitter.split_text(text)
+        )
 
     print(
         f"Oprettet {len(chunks)} chunks "
@@ -400,7 +429,7 @@ def setup_chroma_db(
             - SentenceTransformer-modellen.
 
     Side Effects:
-        Opretter en persistent Chroma DB i mappen `squad_rag_db`.
+        Opretter en persistent Chroma DB i mappen `squad_rag_test_db`.
     """
     print("Opretter/åbner Chroma DB...")
 
@@ -425,7 +454,7 @@ def setup_chroma_db(
     # Det sparer tid, fordi embeddings ellers skal beregnes igen.
     if collection.count() > 0:
         print(
-            f"Genbruger eksisterende Chroma DB "
+            f"Genbruger eksisterende test-DB "
             f"({collection.count()} chunks)."
         )
         return collection, model
@@ -437,7 +466,10 @@ def setup_chroma_db(
         batch_size=32
     ).tolist()
 
-    ids = [f"id_{i}" for i in range(len(chunks))]
+    ids = [
+        f"id_{i}"
+        for i in range(len(chunks))
+    ]
 
     collection.add(
         documents=chunks,
@@ -446,7 +478,7 @@ def setup_chroma_db(
     )
 
     print(
-        f"Gemt {len(chunks)} chunks i Chroma DB "
+        f"Gemt {len(chunks)} chunks i test-DB "
         f"({CONFIG['chroma_db_path']})."
     )
 
@@ -471,25 +503,70 @@ def ask_rag(
                for spørgsmålet.
         ollama_client: Genbrugt Ollama-client.
         query: Spørgsmålet, der skal besvares.
-        n_results: Antal chunks at returnere fra Chroma DB (default: 3).
+        n_results: Antal chunks at returnere fra Chroma DB (default: 5).
 
     Returns:
         str: LLM'ens genererede svar baseret på den fundne kontekst.
     """
-    query_embedding = model.encode([query]).tolist()
+    query_embedding = model.encode(
+        [query]
+    ).tolist()
 
     results = collection.query(
         query_embeddings=query_embedding,
-        n_results=n_results
+        n_results=n_results,
+        include=[
+            "documents",
+            "distances"
+        ]
     )
- 
+
+    documents = results["documents"][0]
+    distances = results["distances"][0]
+
+    # Fjern identiske chunks fra retrieval-resultatet.
+    # Dette sikrer, at LLM'en får flere forskellige tekststykker,
+    # hvis Chroma returnerer dubletter.
+    unique_documents = []
+    unique_distances = []
+    seen = set()
+
+    for doc, distance in zip(
+        documents,
+        distances
+    ):
+        if doc in seen:
+            continue
+
+        seen.add(doc)
+
+        unique_documents.append(doc)
+        unique_distances.append(distance)
+
+    print(
+        f"\n   Retrieval: "
+        f"{len(documents)} resultater -> "
+        f"{len(unique_documents)} unikke chunks"
+    )
+
     # Debug: vis hvilke chunks ChromaDB har fundet.
-    for idx, doc in enumerate(results["documents"][0], 1):
-        print(f"\n   Chunk {idx}:")
-        print(f"   {doc}")
+    for idx, (doc, distance) in enumerate(
+        zip(
+            unique_documents,
+            unique_distances
+        ),
+        1
+    ):
+        print(
+            f"\n   Chunk {idx} "
+            f"(distance: {distance:.4f}):"
+        )
+        print(
+            f"   {doc}"
+        )
 
     context = "\n\n".join(
-        results["documents"][0]
+        unique_documents
     )
 
     # query er brugerens spørgsmål.
@@ -553,7 +630,9 @@ def evaluate_rag(
         len(answers)
     )
 
-    for i in range(questions_to_evaluate):
+    for i in range(
+        questions_to_evaluate
+    ):
         query = questions[i]
         true_answer = answers[i].lower()
 
@@ -583,7 +662,9 @@ def evaluate_rag(
         )
 
     if questions_to_evaluate == 0:
-        print("\nIngen spørgsmål kunne evalueres.")
+        print(
+            "\nIngen spørgsmål kunne evalueres."
+        )
         return 0.0
 
     accuracy = (
@@ -605,7 +686,7 @@ def main():
 
     1. Downloader SQuAD-dataset (hvis nødvendigt).
     2. Indlæser spørgsmål, svar og kontekster.
-    3. Opdeler data i chunks.
+    3. Fjerner dublerede kontekster og opdeler data i chunks.
     4. Opretter eller genbruger Chroma DB med embeddings.
     5. Tester systemet med 10 spørgsmål.
     6. Åbner interaktivt spørgsmålsinterface.
@@ -628,6 +709,8 @@ def main():
         CONFIG["max_questions"]
     )
 
+    # Samme kontekst kan bruges af flere spørgsmål.
+    # Derfor chunkes hver unik kontekst kun én gang.
     chunks = clean_and_chunk(
         contexts
     )
