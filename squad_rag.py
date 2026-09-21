@@ -1,7 +1,7 @@
 """
 SQuAD RAG-System
 ================
-Sidst opdateret: 2026-09-19 15:30:54
+Sidst opdateret: 2026-09-21 13:40:32
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 HVORDAN RAG FUNGERER
@@ -32,7 +32,6 @@ Begrænsninger:
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 SQuAD-DATASET
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
 Direkte download (JSON):
    https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/train-v1.1.json
 
@@ -125,7 +124,6 @@ Arkitektur:
   [Output] -> Returnerer svar til brugeren
 
 Workflow:
-
   1. Forberedelse: Indlæs SQuAD -> Fjern dublerede kontekster -> Chunk -> Embed -> Gem i Chroma DB
   2. Spørgsmål: Søg i Chroma DB -> Send top-5 chunks -> Få svar fra LLM
   3. Evaluering: Sammenlign LLM-svar med korrekte svar fra SQuAD
@@ -135,7 +133,7 @@ Optimeringer:
   - Streaming JSON-parsing (ijson) for at spare RAM
   - Batch-processing af embeddings (32 chunks ad gangen)
   - Unikke SQuAD-kontekster chunkes kun én gang
-  - Persistent Chroma DB genbruges mellem programkørsler
+  - Test-databasen slettes og opbygges fra bunden ved hver kørsel
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 EKSEMPLER
@@ -159,9 +157,7 @@ FEJLSØGNING
 - [ModuleNotFoundError]&#58;   - Sikre, at alle pakker er installeret:
     `pip install ollama chromadb sentence-transformers ijson langchain-text-splitters`.
 
-- [Chroma DB returnerer ingen resultater]&#58;   - Tjek, at `squad_rag_test_db` eksisterer i den aktuelle mappe.
-  - Hvis chunking-konfigurationen ændres, skal test-databasen slettes og
-    genoprettes, så gamle chunks ikke blandes med den nye konfiguration.
+- [Chroma DB returnerer ingen resultater]&#58;   - Test-databasen oprettes automatisk fra bunden ved hver kørsel.
 
 - [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Vi bruger `n_results=5` for at give LLM'en mere relevant kontekst.
   - Vi bruger 800-tegn chunks med 100 tegn overlap.
@@ -170,7 +166,6 @@ FEJLSØGNING
     ligge i LLM'ens valg af svar.
 
 Output-format under evaluering:
-
 - [OK]&#58; RAG-svaret matchede det korrekte svar (uanset case).
 - [ERR]&#58; RAG-svaret var forkert eller ufuldstændigt.
 - Præcision: Procentdel af korrekte svar (f.eks. 90.0% = 9/10 korrekte).
@@ -212,6 +207,7 @@ Testet på: Raspberry Pi 5 (8GB RAM) med Ubuntu 24.04
 
 import os
 import re
+import shutil
 import ijson
 from typing import List, Tuple
 
@@ -282,7 +278,6 @@ def load_squad_subset(
     answers = []
 
     print(f"Indlæser {max_questions} spørgsmål fra SQuAD...")
-
     with open(CONFIG["squad_file"], "rb") as f:
         for item in ijson.items(f, "data.item"):
             for paragraph in item["paragraphs"]:
@@ -373,9 +368,14 @@ def setup_chroma_db(
     chunks: List[str]
 ) -> Tuple[chromadb.Collection, SentenceTransformer]:
     """
-    Opretter eller genbruger Chroma DB.
+    Opretter en ny test-DB fra bunden.
     """
-    print("Opretter/åbner Chroma DB...")
+    print("Opretter ny Chroma DB...")
+
+    shutil.rmtree(
+        CONFIG["chroma_db_path"],
+        ignore_errors=True
+    )
 
     client = chromadb.PersistentClient(
         path=CONFIG["chroma_db_path"]
@@ -393,14 +393,6 @@ def setup_chroma_db(
     model = SentenceTransformer(
         CONFIG["embeddings_model"]
     )
-
-    # Genbrug eksisterende test-DB, hvis den allerede er bygget.
-    if collection.count() > 0:
-        print(
-            f"Genbruger eksisterende test-DB "
-            f"({collection.count()} chunks)."
-        )
-        return collection, model
 
     print("Genererer embeddings...")
 
