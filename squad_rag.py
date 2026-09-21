@@ -19,7 +19,7 @@ Workflow:
 
 Fordele ved RAG:
 
-- **Reducerer hallucinationer**: LLM'en svarer udelukkende baseret på kontekst, ikke sin træning.
+- **Reducerer hallucinationer**: LLM'en instrueres i kun at svare ud fra konteksten, ikke sin træning.
 - **Aktuelle oplysninger**: Kan svare baseret på specifikke data (f.eks. SQuAD-dataset).
 - **Transparens**: Svaret kan spores tilbage til konteksten.
 
@@ -60,12 +60,16 @@ Chroma DB:
 
    En vektordatabase, der effektivt gemmer og søger i embeddings. Når du
    stiller et spørgsmål, konverteres det til en vektor, og Chroma DB finder
-   hurtigt de mest lignende vektorer ved at bruge cosinus-lighed (cosine similarity).
+   hurtigt de mest lignende vektorer. I dette program er databasen sat op til
+   cosinus-afstand (hnsw:space = cosine).
 
    Cosinus-lighed måler vinklen mellem vektorer:
    1.0 = identisk retning (perfekt match),
    0.0 = ingen lighed,
    -1.0 = modsat retning.
+
+   Chroma returnerer cosinus-AFSTAND, som er 1 - cosinus-lighed:
+   0.0 = identisk retning, lavere er bedre.
 
 LLM/Ollama:
 
@@ -73,6 +77,9 @@ LLM/Ollama:
    menneskelig tekst. Ollama er en lokal server, der gør det nemt at køre
    LLM'er på din egen maskine. I dette program bruger vi Qwen2.5-3B til at
    generere svar baseret på den kontekst, der er fundet via Chroma DB.
+
+   Data, embeddings-model og prompt er alle på engelsk. Stil derfor også
+   spørgsmål på engelsk i den interaktive del.
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 KOMPONENTER OG DERES VIRKEN
@@ -154,20 +161,24 @@ Når systemet køres, kan du stille spørgsmål som:
 FEJLSØGNING
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-- [ModuleNotFoundError]&#58;   - Sikre, at alle pakker er installeret:
+- [ModuleNotFoundError]:
+  - Sikre, at alle pakker er installeret:
     `pip install ollama chromadb sentence-transformers ijson langchain-text-splitters`.
 
-- [Chroma DB returnerer ingen resultater]&#58;   - Test-databasen oprettes automatisk fra bunden ved hver kørsel.
+- [Chroma DB returnerer ingen resultater]:
+  - Test-databasen oprettes automatisk fra bunden ved hver kørsel.
 
-- [LLM’en siger "Jeg ved det ikke" for ofte]&#58;   - Vi bruger `n_results=5` for at give LLM'en mere relevant kontekst.
+- [LLM'en siger "I don't know" for ofte]:
+  - Vi bruger `n_results=5` for at give LLM'en mere relevant kontekst.
   - Vi bruger 800-tegn chunks med 100 tegn overlap.
 
-- [Forkert svar]&#58;   - Tjek om konteksten indeholder det korrekte svar. Hvis ja, kan fejlen
+- [Forkert svar]:
+  - Tjek om konteksten indeholder det korrekte svar. Hvis ja, kan fejlen
     ligge i LLM'ens valg af svar.
 
 Output-format under evaluering:
-- [OK]&#58; RAG-svaret matchede det korrekte svar (uanset case).
-- [ERR]&#58; RAG-svaret var forkert eller ufuldstændigt.
+- [OK]: RAG-svaret matchede det korrekte svar (uanset case).
+- [ERR]: RAG-svaret var forkert eller ufuldstændigt.
 - Præcision: Procentdel af korrekte svar (f.eks. 90.0% = 9/10 korrekte).
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -227,23 +238,72 @@ except ImportError as e:
 
 # --- Konfiguration ---
 CONFIG = {
+    # ------------------------------------------------------------------
+    # Datasæt
+    # ------------------------------------------------------------------
+
+    # Filnavn på SQuAD-træningsdatasættet (JSON).
+    # Downloades automatisk af download_squad(), hvis filen mangler.
     "squad_file": "train-v1.1.json",
+
+    # Hvor mange spørgsmål (med tilhørende facit og kontekst) der indlæses.
+    # Datasættet læses fra starten, så det er de første spørgsmål/artikler,
+    # der bruges - ikke en tilfældig stikprøve.
     "max_questions": 1000,
 
-    # Ændret for den test, der gav 90 %.
+    # ------------------------------------------------------------------
+    # Chunking (opdeling af tekst)
+    # ------------------------------------------------------------------
+
+    # Maksimal længde af en chunk, målt i TEGN (ikke tokens).
+    # Oprindeligt ændret ved en test på 10 spørgsmål, der gav 90 %.
+    # Bemærk: 10 spørgsmål er for få til at konkludere noget. Mange
+    # SQuAD-afsnit er ca. 700-800 tegn, så de fleste bliver kun til én chunk.
     "chunk_size": 800,
+
+    # Antal tegn, der gentages mellem to nabo-chunks, så en sætning på
+    # grænsen ikke mister sin sammenhæng.
     "chunk_overlap": 100,
 
+    # ------------------------------------------------------------------
+    # Modeller
+    # ------------------------------------------------------------------
+
+    # Sentence Transformers-model, der laver tekst om til vektorer
+    # (384 dimensioner). Modellen er engelsk, så både chunks og spørgsmål
+    # bør være på engelsk.
     "embeddings_model": "all-MiniLM-L6-v2",
+
+    # Navn på LLM'en i Ollama. Skal være hentet på forhånd med:
+    #   ollama pull qwen2.5:3b
     "llm_model": "qwen2.5:3b",
 
-    # Separat test-database.
+    # ------------------------------------------------------------------
+    # Chroma DB
+    # ------------------------------------------------------------------
+
+    # Mappen hvor Chroma gemmer databasen på disken.
+    # Separat test-database: den slettes og opbygges fra bunden ved hver
+    # kørsel (se setup_chroma_db), så den kan ikke blandes med en
+    # eventuel rigtig database.
     "chroma_db_path": "squad_rag_test_db",
+
+    # Navn på samlingen (collection) i databasen - kan sammenlignes med
+    # en tabel, der indeholder alle chunks og deres vektorer.
     "chroma_collection": "squad_contexts_test",
 
-    # Ændret fra 3 til 5.
+    # ------------------------------------------------------------------
+    # Retrieval og generering
+    # ------------------------------------------------------------------
+
+    # Antal chunks, der hentes fra Chroma pr. spørgsmål og sendes til LLM'en.
+    # Ændret fra 3 til 5 for at give LLM'en mere kontekst. Flere chunks
+    # giver større chance for, at svaret er med, men også en længere
+    # prompt og langsommere svar.
     "n_results": 5,
 
+    # Maksimalt antal tokens, LLM'en må generere i sit svar.
+    # 128 er rigeligt til korte svar; længere svar afkortes.
     "ollama_num_predict": 128,
 }
 
@@ -307,12 +367,13 @@ def load_squad_subset(
 
 def clean_text(text: str) -> str:
     """
-    Renser en tekststreng ved at fjerne ekstra mellemrum og specialtegn.
-    """
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'[^\w\s.,!?;:]', '', text)
+    Normaliserer mellemrum (flere mellemrum/linjeskift bliver til ét).
 
-    return text.strip()
+    Tegnsætning og specialtegn bevares bevidst. SQuAD-tekst er allerede ren,
+    og fjernelse af tegn som bindestreger, apostroffer og procenttegn
+    ændrer teksten, så facit ikke længere kan matches.
+    """
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def clean_and_chunk(
@@ -381,8 +442,10 @@ def setup_chroma_db(
         path=CONFIG["chroma_db_path"]
     )
 
+    # Cosinus-afstand i stedet for Chromas standard (kvadreret L2).
     collection = client.get_or_create_collection(
-        name=CONFIG["chroma_collection"]
+        name=CONFIG["chroma_collection"],
+        metadata={"hnsw:space": "cosine"},
     )
 
     print(
@@ -477,7 +540,7 @@ def ask_rag(
     ):
         print(
             f"\n   Chunk {idx} "
-            f"(distance: {distance:.4f}):"
+            f"(cosinus-afstand: {distance:.4f}):"
         )
         print(
             f"   {doc}"
@@ -491,18 +554,16 @@ def ask_rag(
     # context indeholder de relevante originale tekststumper (chunks) fra
     # SQuAD-datasættet, som er fundet via ChromaDB og bruges som kontekst
     # til at besvare spørgsmålet.
-    prompt = f"""
-    Besvar spørgsmålet kort og præcist baseret kun på konteksten nedenfor.
-    Brug ikke viden, som ikke findes i konteksten.
-    Hvis svaret ikke findes i konteksten, sig "Jeg ved det ikke".
-
-    Kontekst:
-    {context}
-
-    Spørgsmål: {query}
-
-    Svar:
-    """
+    # Prompten er på engelsk, fordi data og embeddings-model er engelske.
+    prompt = (
+        "Answer the question briefly and precisely, based only on the "
+        "context below.\n"
+        "Do not use any knowledge that is not in the context.\n"
+        "If the answer is not in the context, say \"I don't know\".\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question: {query}\n\n"
+        "Answer:"
+    )
 
     response = ollama_client.generate(
         model=CONFIG["llm_model"],
@@ -634,7 +695,7 @@ def main():
     while True:
         try:
             query = input(
-                "\nIndtast dit spørgsmål (eller 'exit'): "
+                "\nIndtast dit spørgsmål på engelsk (eller 'exit'): "
             ).strip()
 
             if query.lower() in (
