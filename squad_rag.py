@@ -1,7 +1,7 @@
 """
 SQuAD RAG-System
 ================
-Sidst opdateret: 2026-09-21 13:40:32
+Sidst opdateret: 2026-09-22 07:07:15
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 HVORDAN RAG FUNGERER
@@ -116,7 +116,7 @@ DESIGN-BESKRIVELSE
 Arkitektur:
   SQuAD-dataset (JSON)
        ↓
-  [Load Subset] -> Indlæser 1.000 spørgsmål + kontekster
+  [Load Subset] -> Indlæser 5.000 spørgsmål + kontekster
        ↓
   [Clean & Chunk] -> Opdeler unikke kontekster i 800-tegn chunks
        ↓
@@ -248,8 +248,9 @@ CONFIG = {
 
     # Hvor mange spørgsmål (med tilhørende facit og kontekst) der indlæses.
     # Datasættet læses fra starten, så det er de første spørgsmål/artikler,
-    # der bruges - ikke en tilfældig stikprøve.
-    "max_questions": 1000,
+    # der bruges - ikke en tilfældig stikprøve. Sat op fra 1000 til 5000
+    # for at få flere unikke kontekster med i databasen.
+    "max_questions": 5000,
 
     # ------------------------------------------------------------------
     # Chunking (opdeling af tekst)
@@ -583,7 +584,7 @@ def evaluate_rag(
     ollama_client: Client,
     questions: List[str],
     answers: List[str],
-    num_questions: int = 10
+    num_questions: int = 50
 ) -> float:
     """
     Evaluerer RAG-systemet ved at sammenligne LLM-svar
@@ -682,7 +683,7 @@ def main():
         ollama_client,
         questions,
         answers,
-        num_questions=10
+        num_questions=50
     )
 
     print("\n" + "=" * 60)
